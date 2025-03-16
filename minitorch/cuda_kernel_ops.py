@@ -432,7 +432,7 @@ class CudaKernelOps(TensorOps):
     @staticmethod
     def layernorm_fw(inp: Tensor, gamma: Tensor, beta: Tensor):
       #   BEGIN ASSIGN3_2
-      batch_size, seq_len, hidden_size = inp.shape
+      batch_tok, hidden_size = inp.shape
       stream = torch.cuda.current_stream().cuda_stream
 
       lib_layernorm.launch_layernorm.argtypes = [
@@ -444,23 +444,76 @@ class CudaKernelOps(TensorOps):
         np.ctypeslib.ndpointer(dtype=datatype, ndim=1, flags='C_CONTIGUOUS'),
         ctypes.c_int,
         ctypes.c_int, 
-        ctypes.c_void_p
+        ctypes.c_void_p,
       ]
 
       lib_layernorm.launch_layernorm.restype = None
 
       out = inp.zeros(inp.shape)
+      mean = inp.zeros((batch_tok,))
+      var = inp.zeros((batch_tok,))
 
       lib_layernorm.launch_layernorm(
         out._tensor._storage,
-        
-
+        var._tensor._storage,  # vars
+        mean._tensor._storage,  # means
+        inp._tensor._storage, # inp
+        gamma._tensor._storage,  # scale
+        beta._tensor._storage,  # bias 
+        batch_tok,  # batch_size
+        hidden_size,  # hidden_dim
+        stream
       )
+      return out, mean, var
       #   END ASSIGN3_2
       
     @staticmethod
     def layernorm_bw(out_grad: Tensor, inp: Tensor, gamma: Tensor, beta: Tensor, var: Tensor, mean: Tensor):
       #   BEGIN ASSIGN3_2
-      raise("Not implemented")
+      batch_tok, hidden_size = inp.shape
+      stream1 = torch.cuda.current_stream().cuda_stream
+      stream2 = torch.cuda.current_stream().cuda_stream
+
+      gamma_grad = gamma.zeros(gamma.shape)
+      beta_grad = beta.zeros(beta.shape)
+      inp_grad = inp.zeros(inp.shape)
+
+      lib_layernorm.launch_layernorm_bw.argtypes = [
+        np.ctypeslib.ndpointer(dtype=datatype, ndim=1, flags='C_CONTIGUOUS'),
+        np.ctypeslib.ndpointer(dtype=datatype, ndim=1, flags='C_CONTIGUOUS'),
+        np.ctypeslib.ndpointer(dtype=datatype, ndim=1, flags='C_CONTIGUOUS'),
+        np.ctypeslib.ndpointer(dtype=datatype, ndim=1, flags='C_CONTIGUOUS'),
+        np.ctypeslib.ndpointer(dtype=datatype, ndim=1, flags='C_CONTIGUOUS'),
+        np.ctypeslib.ndpointer(dtype=datatype, ndim=1, flags='C_CONTIGUOUS'),
+        np.ctypeslib.ndpointer(dtype=datatype, ndim=1, flags='C_CONTIGUOUS'),
+        np.ctypeslib.ndpointer(dtype=datatype, ndim=1, flags='C_CONTIGUOUS'),
+        np.ctypeslib.ndpointer(dtype=datatype, ndim=1, flags='C_CONTIGUOUS'),
+        ctypes.c_int,
+        ctypes.c_int,
+        ctypes.c_void_p,
+        ctypes.c_void_p
+      ]
+
+      lib_layernorm.launch_layernorm_bw.restype = None
+
+
+      lib_layernorm.launch_layernorm_bw(
+        gamma_grad._tensor._storage,
+        beta_grad._tensor._storage,
+        inp_grad._tensor._storage,
+        out_grad._tensor._storage,
+        inp._tensor._storage,
+        gamma._tensor._storage,
+        beta._tensor._storage,
+        var._tensor._storage,
+        mean._tensor._storage,
+        batch_tok,
+        hidden_size,
+        stream1,
+        stream2
+      )
+
+      return inp_grad, gamma_grad, beta_grad
+
       #   END ASSIGN3_2
       

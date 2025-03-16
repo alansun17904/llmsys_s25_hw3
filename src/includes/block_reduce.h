@@ -31,6 +31,10 @@ __inline__ __device__ void warpReduce<ReduceType::kMax, 1>(float *pval) {
   *pval = max(*pval, __shfl_xor_sync(WARP_REDUCE_MASK, *pval, 1, 32));
 }
 
+/* after this exchange, each thread how has the maximum value of pval
+ * across the entire warp.
+ */
+
 template <>
 __inline__ __device__ void warpReduce<ReduceType::kMax, 2>(float *pval) {
   float val0_tmp, val1_tmp;
@@ -47,6 +51,11 @@ __inline__ __device__ void warpReduce<ReduceType::kMax, 2>(float *pval) {
   WarpReduceMaxOneStep(1, 32);
 #undef WarpReduceMaxOneStep
 }
+
+/* Given an address pval, after running this, each thread has the maximum
+ * value of the float stored at address pval and pval + sizeof(float) across
+ * all of the threads.
+ */
 
 template <>
 __inline__ __device__ void warpReduce<ReduceType::kSum, 1>(float *pval) {
@@ -109,17 +118,20 @@ __inline__ __device__ void blockReduce<ReduceType::kSum, 1>(float *pval) {
   int lane_id = threadIdx.x & 0x1f;
   int wid = threadIdx.x >> 5;
 
+  // each warp is performing its own reduction
   warpReduce<ReduceType::kSum, num>(pval);
 
+  // the first thread in each warps writes to shared memory NUM values
   if (lane_id == 0) {
 #pragma unroll
     for (int i = 0; i < num; ++i) {
       shared[i][wid] = *(pval + i);
     }
   }
-  __syncthreads();
+  __syncthreads();  // ensures that all warps have written their values to memory
 
-  if (threadIdx.x < (blockDim.x >> 5)) {
+  // the first warp reads and combines all warp results
+  if (threadIdx.x < (blockDim.x >> 5)) { // only the theads in the first wap
 #pragma unroll
     for (int i = 0; i < num; ++i) {
       *(pval + i) = shared[i][lane_id];
@@ -130,8 +142,11 @@ __inline__ __device__ void blockReduce<ReduceType::kSum, 1>(float *pval) {
       *(pval + i) = 0.f;
     }
   }
-  warpReduce<ReduceType::kSum, num>(pval);
+  warpReduce<ReduceType::kSum, num>(pval); // all of the threads in the first warp
+  // gets all of the results
 }
+
+
 
 template <>
 __inline__ __device__ void blockReduce<ReduceType::kSum, 2>(float *pval) {

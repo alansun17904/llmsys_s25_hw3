@@ -55,25 +55,40 @@ __global__ void ker_layer_norm(T *ln_res, T *vars, T *means, const T *inp,
   }
 
   // Step 2
-  blockReduce<ReduceType::kSum>(l_sum);
-  blockReduce<ReduceType::kSum>(l_sum_sq);
-  float sigma = l_sum / ((float) hidden_size) + l_sum_sq / ((float) hidden_size) + LN_EPSILON
-  float inv_sigma = rsqrt(sigma);
+  blockReduce<ReduceType::kSum, 1>(&l_sum);
+  blockReduce<ReduceType::kSum, 1>(&l_sum_sq);
+
+  __shared__ float s_mean, s_var; 
+  int hs = hidden_size * 4;
+  if (threadIdx.x == 0) {
+    s_mean = l_sum / ((float) hs);
+    s_var = (l_sum_sq / ((float) hs)) - s_mean * s_mean + LN_EPSILON;
+
+    if (means != nullptr) {
+      means[blockIdx.x] = s_mean;
+    }
+    vars[blockIdx.x] = s_var;
+  }
+
+  __syncthreads();
+
+  float inv_sigma = rsqrt(s_var);
 
   // Step 3
-  float4 *ln_res_f4 = reinterpret_cast<const float4 *>(ln_res) + blockIdx.x * hidden_size;
+  float4 *ln_res_f4 = reinterpret_cast<float4 *>(ln_res) + blockIdx.x * hidden_size;
   const float4 *scale_f4 = reinterpret_cast<const float4 *>(scale);
   const float4 *bias_f4 = reinterpret_cast<const float4 *>(bias);
+  
   for (uint idx = threadIdx.x; idx < hidden_size; idx += blockDim.x) {
       float4 inp_val = inp_f4[idx];
       float4 scale_val = scale_f4[idx];
       float4 bias_val = bias_f4[idx];
       
       float4 result;
-      result.x = ((inp_val.x - mean) * inv_std) * scale_val.x + bias_val.x;
-      result.y = ((inp_val.y - mean) * inv_std) * scale_val.y + bias_val.y;
-      result.z = ((inp_val.z - mean) * inv_std) * scale_val.z + bias_val.z;
-      result.w = ((inp_val.w - mean) * inv_std) * scale_val.w + bias_val.w;
+      result.x = ((inp_val.x - s_mean) * inv_sigma) * scale_val.x + bias_val.x;
+      result.y = ((inp_val.y - s_mean) * inv_sigma) * scale_val.y + bias_val.y;
+      result.z = ((inp_val.z - s_mean) * inv_sigma) * scale_val.z + bias_val.z;
+      result.w = ((inp_val.w - s_mean) * inv_sigma) * scale_val.w + bias_val.w;
       
       ln_res_f4[idx] = result;
   }
@@ -198,14 +213,52 @@ __global__ void ker_ln_bw_dgamma_dbetta(T *gamma_grad, T *betta_grad,
   cg::thread_block_tile<TILE_DIM> g = cg::tiled_partition<TILE_DIM>(b);
 
   // Step 1
+  // rows = batch_size, width = hidden_dim ; loop over batch size
+  int col_idx = blockIdx.x * blockDim.x + threadIdx.x;  // the col index
+  float dbetta = 0.0f;
+  float dgamma = 0.0f;
+
+  if (col_idx >= width) {
+    return;
+  }
 
   // Step 2
-  
-  // Step 3
-  
-  // Step 4
+  for (int row_idx = threadIdx.y; row_idx < rows; row_idx += blockDim.y) {
+    int idx = row_idx * width + col_idx;
+    float dout = out_grad[idx];
 
-  assert(false && "Not Implemented");
+    float xhat, out_val, inp_val, mean_val, var_val;
+    if (means != nullptr) {
+      inp_val = inp[idx];
+      mean_val = means[row_idx];
+      var_val = vars[row_idx];
+      xhat = (inp_val - mean_val) * rsqrt(var_val + LN_EPSILON);
+    } else {
+      out_val = inp[idx];
+      xhat = (out_val - betta[col_idx]) / gamma[col_idx];
+    }
+    dbetta += dout; 
+    dgamma += dout * xhat;
+  }
+
+  // Step 3
+  betta_buffer[threadIdx.x][threadIdx.y] = dbetta;
+  gamma_buffer[threadIdx.x][threadIdx.y] = dgamma;
+  __syncthreads();
+
+  // Step 4
+  float betta_sum = betta_buffer[threadIdx.y][threadIdx.x];
+  float gamma_sum = gamma_buffer[threadIdx.y][threadIdx.x];
+
+  for (int i = 16; i > 0; i /= 2) {
+    betta_sum += g.shfl_down(betta_sum, i);
+    gamma_sum += g.shfl_down(gamma_sum, i);
+  }
+
+  if (threadIdx.x == 0 && col_idx < width) {
+    betta_grad[blockDim.x * blockIdx.x + threadIdx.y] = betta_sum;
+    gamma_grad[blockDim.x * blockIdx.x + threadIdx.y] = gamma_sum;
+  }
   /// END ASSIGN3_2
 }
 
@@ -247,20 +300,72 @@ __global__ void ker_ln_bw_dinp(T *inp_grad, const T *out_grad, const T *inp,
   /// BEGIN ASSIGN3_2
   /// TODO
   // Hints:
-  // 1. Compute dxhat=dy*w with reinterpret_cast by casting to float4 for speedup
+  // 1. Compute dxhat=dy*gamma with reinterpret_cast by casting to float4 for speedup
   // 2. Compute xhat with reinterpret_cast by casting to float4 for speedup
   // 3. Compute reduce sum for dxhat and dxhat*xhat with blockReduce
   // 4. Compute final gradient
   
   // Step 1
- 
-  // Step 2
-   
-  // Step 3
- 
-  // Step 4
+  int idx = blockIdx.x * hidden_dim + threadIdx.x;
+  float rsig = rsqrt(((float)vars[blockIdx.x]) + LN_EPSILON);
   
-  assert(false && "Not Implemented");
+  float4 dxhat, xhat;
+  if (threadIdx.x < hidden_dim) {
+    // d_xhat = d_out * gamma
+    dxhat = reinterpret_cast<const float4 *>(out_grad)[idx]; 
+    float4 gamma_i = reinterpret_cast<const float4 *>(gamma)[threadIdx.x]; 
+    float4 beta_i = reinterpret_cast<const float4 *>(betta)[threadIdx.x]; 
+
+    dxhat.x *= gamma_i.x;
+    dxhat.y *= gamma_i.y;
+    dxhat.z *= gamma_i.z;
+    dxhat.w *= gamma_i.w;
+
+    xhat = reinterpret_cast<const float4 *>(inp)[idx]; // not inp_or_out
+    
+    if (means == nullptr) {
+      xhat.x = (xhat.x - beta_i.x) / gamma_i.x;
+      xhat.y = (xhat.x - beta_i.y) / gamma_i.y;
+      xhat.z = (xhat.x - beta_i.z) / gamma_i.z;
+      xhat.w = (xhat.x - beta_i.w) / gamma_i.w;
+    } else {
+      float mean = ((float)means[blockIdx.x]);
+      xhat.x = (xhat.x - mean) * rsig;
+      xhat.y = (xhat.y - mean) * rsig;
+      xhat.z = (xhat.z - mean) * rsig;
+      xhat.w = (xhat.w - mean) * rsig;
+    }
+  }
+
+  // Step 2
+  float dxhat_sum = 0.0f;
+  float xhat_dxhat_sum = 0.0f;
+  if (threadIdx.x < hidden_dim) {
+    dxhat_sum = dxhat.x + dxhat.y + dxhat.z + dxhat.w;
+    xhat_dxhat_sum = dxhat.x * xhat.x + dxhat.y * xhat.y + dxhat.z * xhat.z + dxhat.w * xhat.w;
+  }
+  
+  // Step 3
+  blockReduce<ReduceType::kSum, 1>(&dxhat_sum);
+  blockReduce<ReduceType::kSum, 1>(&xhat_dxhat_sum);
+
+  __shared__ float s_dxhat_sum, s_xhat_dxhat_sum;
+  if (threadIdx.x == 0) {
+    s_dxhat_sum = dxhat_sum / (4 * hidden_dim);
+    s_xhat_dxhat_sum = xhat_dxhat_sum / (4 * hidden_dim);
+  }
+  __syncthreads();
+
+  // Step 4
+  if (threadIdx.x < hidden_dim) {
+    // dxhat is now calculating inp_grad
+    dxhat.x = (dxhat.x - s_dxhat_sum - xhat.x * s_xhat_dxhat_sum) * rsig;
+    dxhat.y = (dxhat.y - s_dxhat_sum - xhat.y * s_xhat_dxhat_sum) * rsig;
+    dxhat.z = (dxhat.z - s_dxhat_sum - xhat.z * s_xhat_dxhat_sum) * rsig;
+    dxhat.w = (dxhat.w - s_dxhat_sum - xhat.w * s_xhat_dxhat_sum) * rsig;
+
+    reinterpret_cast<float4 *>(inp_grad)[idx] = dxhat;
+  }
   /// END ASSIGN3_2
 }
 extern "C" {

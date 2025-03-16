@@ -135,28 +135,31 @@ class PowerScalar(Function):
                 The tensor to raise to the power of.
             scalar : Tensor
                 The exponent of shape (1,).
-
+        
         Returns
         -------
             output : Tensor
                 Tensor containing the result of raising every element of a to scalar.
         """
-        # COPY FROM ASSIGN2_1
-        raise NotImplementedError
+        ### BEGIN YOUR SOLUTION
+        out = a.f.pow_scalar_zip(a, scalar)
+        ctx.save_for_backward(a, scalar)
+        return out
+        ### END YOUR SOLUTION
 
     @staticmethod
     def backward(ctx: Context, grad_output: Tensor) -> Tuple[Tensor, float]:
         """Calculates the gradient of the input a with respect to grad_output.
         NOTE: miniTorch requires that we two gradients: one for the input tensor and scalar.
         Technically, we should only return one gradient for the tensor since there is no gradient for a constant.
-
+        
         Parameters
         ----------
             ctx : Context
                 The same context used in forward.
             grad_output : Tensor
                 The gradient in the backward pass with respect to the output of forward. (Same shape as forward's output.)
-
+        
         Returns
         -------
             gradients : Tuple[Tensor, float]
@@ -165,16 +168,17 @@ class PowerScalar(Function):
         """
         a, scalar = ctx.saved_values
         grad_a    = None
-
-        # COPY FROM ASSIGN2_1
-        raise NotImplementedError
+        
+        ### BEGIN YOUR SOLUTION
+        grad_a = grad_output * (scalar * (a ** (scalar - 1)))
+        ### END YOUR SOLUTION
 
         return (grad_a, 0.0)
 
 
 class Tanh(Function):
     @staticmethod
-    def forward(ctx: Context, a: Tensor) -> Tensor:
+    def forward(ctx: Context, a: Tensor) -> Tensor: 
         """Calculates the element-wise tanh of a
         Equivalent to np.tanh(a) in numpy if a is a n-dimensional array.
 
@@ -184,33 +188,39 @@ class Tanh(Function):
                 A context object you can temporarily store values to.
             a : Tensor
                 The tensor to take the tanh of.
-
+        
         Returns
         -------
             output : Tensor
                 Tensor containing the element-wise tanh of a.
         """
-        # COPY FROM ASSIGN2_1
-        raise NotImplementedError
-
+        ### BEGIN YOUR SOLUTION
+        out = a.f.tanh_map(a)
+        ctx.save_for_backward(out)
+        return out
+        ### END YOUR SOLUTION
+    
     @staticmethod
     def backward(ctx: Context, grad_output: Tensor) -> Tensor:
         """Calculates the gradient of the input a with respect to grad_output.
-
+        
         Parameters
         ----------
             ctx : Context
                 The same context used in forward.
             grad_output : Tensor
                 The gradient in the backward pass with respect to the output of forward. (Same shape as forward's output.)
-
+        
         Returns
         -------
             output : Tensor
                 gradient_for_a must be the correct element-wise gradient for tanh.
         """
-        # COPY FROM ASSIGN2_1
-        raise NotImplementedError
+        ### BEGIN YOUR SOLUTION
+        out = ctx.saved_values[0]
+        return grad_output * (-(out ** 2) + 1)
+        ### END YOUR SOLUTION
+
 
 
 class Sigmoid(Function):
@@ -436,13 +446,16 @@ class LayerNorm(Function):
     @staticmethod
     def forward(ctx: Context, inp: Tensor, gamma: Tensor, beta: Tensor) -> Tensor:
       #   BEGIN ASSIGN3_2
-      return inp.f.layernorm_fw(inp, gamma, beta)
+      out, mean, var = inp.f.layernorm_fw(inp, gamma, beta)
+      ctx.save_for_backward(inp, gamma, beta, mean, var)
+      return out
       #   END ASSIGN3_2
 
     @staticmethod
     def backward(ctx: Context, out_grad: Tensor) -> Tensor:
       #   BEGIN ASSIGN3_2
-      raise NotImplementedError("Need to implement for Assignment 3")
+      inp, gamma, beta, mean, var = ctx.saved_values
+      return out_grad.f.layernorm_bw(out_grad, inp, gamma, beta, var, mean)
       #   END ASSIGN3_2
 
 
