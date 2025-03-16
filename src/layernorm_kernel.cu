@@ -46,17 +46,37 @@ __global__ void ker_layer_norm(T *ln_res, T *vars, T *means, const T *inp,
   
   // Step 1
   float l_sum = 0;
+  float l_sum_sq = 0;
   const float4 *inp_f4 = reinterpret_cast<const float4 *>(inp) + blockIdx.x * hidden_size;  
   for (uint idx = threadIdx.x; idx < hidden_size; idx += blockDim.x) {
     float4 val = inp_f4[idx];
     l_sum += val.x + val.y + val.z + val.w;
+    l_sum_sq += val.x * val.x + val.y * val.y + val.z * val.z + val.w * val.w;
   }
 
   // Step 2
+  blockReduce<ReduceType::kSum>(l_sum);
+  blockReduce<ReduceType::kSum>(l_sum_sq);
+  float sigma = l_sum / ((float) hidden_size) + l_sum_sq / ((float) hidden_size) + LN_EPSILON
+  float inv_sigma = rsqrt(sigma);
 
   // Step 3
-  
-  assert(false && "Not Implemented");
+  float4 *ln_res_f4 = reinterpret_cast<const float4 *>(ln_res) + blockIdx.x * hidden_size;
+  const float4 *scale_f4 = reinterpret_cast<const float4 *>(scale);
+  const float4 *bias_f4 = reinterpret_cast<const float4 *>(bias);
+  for (uint idx = threadIdx.x; idx < hidden_size; idx += blockDim.x) {
+      float4 inp_val = inp_f4[idx];
+      float4 scale_val = scale_f4[idx];
+      float4 bias_val = bias_f4[idx];
+      
+      float4 result;
+      result.x = ((inp_val.x - mean) * inv_std) * scale_val.x + bias_val.x;
+      result.y = ((inp_val.y - mean) * inv_std) * scale_val.y + bias_val.y;
+      result.z = ((inp_val.z - mean) * inv_std) * scale_val.z + bias_val.z;
+      result.w = ((inp_val.w - mean) * inv_std) * scale_val.w + bias_val.w;
+      
+      ln_res_f4[idx] = result;
+  }
   /// END ASSIGN3_2
 }
 
